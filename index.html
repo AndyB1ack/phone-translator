@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0f1115">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-180.png">
+<title>Переводчик</title>
+<style>
+  :root { --he:#2563eb; --en:#dc2626; --me:#0ea5e9; --bg:#0f1115; --card:#181b22; --txt:#f1f5f9; --dim:#94a3b8; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--txt);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; overscroll-behavior:none; }
+  #app { display:flex; flex-direction:column; height:100dvh; padding:env(safe-area-inset-top) 10px env(safe-area-inset-bottom); }
+  .half { flex:1; display:flex; flex-direction:column; gap:10px; padding:10px 0; min-height:0; }
+  .flip { transform:rotate(180deg); }
+  .texts { flex:1; background:var(--card); border-radius:18px; padding:14px 16px; overflow-y:auto; min-height:0;
+    display:flex; flex-direction:column; justify-content:flex-end; }
+  .big { font-size:clamp(22px,6.2vw,34px); font-weight:650; line-height:1.25; white-space:pre-wrap; unicode-bidi:plaintext; }
+  .small { font-size:16px; color:var(--dim); margin-top:8px; white-space:pre-wrap; unicode-bidi:plaintext; }
+  .hint { color:var(--dim); font-size:18px; }
+  .mic { height:76px; border:0; border-radius:20px; font-size:22px; font-weight:700; color:#fff; touch-action:manipulation; }
+  #meBtn { background:var(--me); }
+  #themBtn { background:var(--he); }
+  body.en #themBtn { background:var(--en); }
+  .mic.rec { background:#e11d48 !important; animation:pulse 1s infinite; }
+  .mic:disabled { opacity:.45; }
+  @keyframes pulse { 50% { filter:brightness(1.35); } }
+  #bar { display:flex; align-items:center; gap:10px; padding:2px 0; }
+  #bar button { background:var(--card); color:var(--txt); border:1px solid #2a2f3a; border-radius:12px;
+    font-size:17px; font-weight:700; padding:9px 14px; }
+  #langBtn { min-width:110px; } #modeBtn { min-width:54px; }
+  #status { flex:1; text-align:center; color:var(--dim); font-size:15px; min-height:20px; }
+  #status.err { color:#f87171; }
+  dialog { background:var(--card); color:var(--txt); border:1px solid #2a2f3a; border-radius:18px; width:min(92vw,460px); }
+  dialog::backdrop { background:rgba(0,0,0,.6); }
+  dialog input[type=password], dialog input[type=text] { width:100%; font-size:16px; padding:10px; border-radius:10px;
+    border:1px solid #334; background:#0f1115; color:var(--txt); }
+  dialog label { display:flex; gap:10px; align-items:center; margin:12px 0; font-size:16px; }
+  dialog .row { display:flex; gap:10px; margin-top:14px; }
+  dialog .row button { flex:1; padding:12px; border-radius:12px; border:0; font-size:16px; font-weight:700; }
+  .primary { background:var(--me); color:#fff; } .ghost { background:#2a2f3a; color:var(--txt); }
+  .costs { color:var(--dim); font-size:14px; margin-top:6px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <section class="half flip" id="themHalf">
+    <div class="texts" dir="auto"><div class="big" id="themBig"></div><div class="small" id="themSmall"></div></div>
+    <button class="mic" id="themBtn"></button>
+  </section>
+
+  <div id="bar">
+    <button id="langBtn"></button>
+    <button id="modeBtn"></button>
+    <span id="status"></span>
+    <button id="cfgBtn" aria-label="Настройки">⚙︎</button>
+  </div>
+
+  <section class="half" id="meHalf">
+    <div class="texts"><div class="big" id="meBig"></div><div class="small" id="meSmall"></div></div>
+    <button class="mic" id="meBtn"></button>
+  </section>
+</div>
+
+<dialog id="cfg">
+  <h3 style="margin-top:0">Настройки</h3>
+  <div>Ключ OpenAI (хранится только на этом телефоне):</div>
+  <input id="keyIn" type="password" placeholder="sk-..." autocomplete="off">
+  <label><input type="checkbox" id="speakRu"> Озвучивать перевод собеседника по-русски</label>
+  <label><input type="checkbox" id="speakMe" checked> Озвучивать мой перевод вслух</label>
+  <div class="costs" id="costInfo"></div>
+  <div class="row">
+    <button class="ghost" id="cfgCancel">Закрыть</button>
+    <button class="primary" id="cfgSave">Сохранить</button>
+  </div>
+</dialog>
+
+<script>
+const $ = id => document.getElementById(id);
+const API = "https://api.openai.com/v1";
+const STT = "gpt-4o-transcribe", LLM = "gpt-4.1-mini", TTS = "gpt-4o-mini-tts", VOICE = "onyx";
+const PRICE = { stt: 0.006, tts: 0.015, llmIn: 0.40e-6, llmOut: 1.60e-6 };   // оценка, $/мин и $/токен
+
+const L = {
+  he: { name: "иврит", label: "עב ⇄ RU", btn: "🎤  לחץ ודבר", rec: "●  מקליט… לחץ לסיום", wait: "רגע…",
+        hint: "לחץ על הכפתור ודבר בעברית", tts: "Speak Hebrew naturally and clearly, at a calm pace.",
+        prompt: "שיחה ידידותית ביום-יום." },
+  en: { name: "английский", label: "EN ⇄ RU", btn: "🎤  Tap & speak", rec: "●  Recording… tap to stop", wait: "One moment…",
+        hint: "Tap the button and speak English", tts: "Speak English naturally and clearly, at a calm pace.",
+        prompt: "Friendly everyday conversation." },
+  ru: { name: "русский", tts: "Говори по-русски естественно и спокойно.", prompt: "Дружеский разговор." },
+};
+const FROM = { he: "иврита", en: "английского", ru: "русского" };
+
+let KEY = localStorage.getItem("oai_key") || "";
+let LANG = localStorage.getItem("lang") || "he";
+let SPEAK_RU = localStorage.getItem("speak_ru") === "1";
+let SPEAK_ME = localStorage.getItem("speak_me") !== "0";
+let MODE = localStorage.getItem("mode") || "phrase";      // phrase | rt
+const RT = { me: null, them: null };                       // соединения «на лету»
+let rtActive = null, rtSince = 0;
+const PRICE_RT = 0.034;                                    // $/мин, gpt-realtime-translate
+const ym = new Date().toISOString().slice(0, 7);
+let costMonth = +(localStorage.getItem("cost_" + ym) || 0);
+let costSession = 0;
+
+const hist = [];
+let ctx = null, stream = null, rec = null, chunks = [], who = null, busy = false, recTimer = null, t0 = 0;
+
+function audioCtx() {
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === "suspended") ctx.resume();
+  return ctx;
+}
+function status(t, err) { $("status").textContent = t || ""; $("status").className = err ? "err" : ""; }
+function addCost(usd) {
+  costSession += usd; costMonth += usd;
+  localStorage.setItem("cost_" + ym, costMonth.toFixed(5));
+}
+function money(v) { return "$" + (v < 1 ? v.toFixed(3) : v.toFixed(2)); }
+
+function applyLang() {
+  document.body.className = LANG;
+  $("langBtn").textContent = L[LANG].label;
+  $("modeBtn").textContent = MODE === "rt" ? "⚡" : "🎯";
+  $("themBtn").textContent = L[LANG].btn;
+  $("meBtn").textContent = "🎤  Говорить";
+  if (!$("themBig").textContent) $("themBig").innerHTML = `<span class="hint">${L[LANG].hint}</span>`;
+  if (!$("meBig").textContent) $("meBig").innerHTML = `<span class="hint">Нажми «Говорить», скажи фразу и нажми ещё раз</span>`;
+  localStorage.setItem("lang", LANG);
+}
+
+function setRec(side) {
+  $("meBtn").classList.toggle("rec", side === "me");
+  $("themBtn").classList.toggle("rec", side === "them");
+  $("meBtn").textContent = side === "me" ? (MODE === "rt" ? "●  Перевожу на лету… нажми, чтобы закончить" : "●  Запись… нажми, чтобы закончить") : "🎤  Говорить";
+  $("themBtn").textContent = side === "them" ? L[LANG].rec : L[LANG].btn;
+  $("langBtn").disabled = !!side;
+}
+function setBusy(b) {
+  $("meBtn").disabled = b; $("themBtn").disabled = b; $("langBtn").disabled = b;
+  if (b) $("themBtn").textContent = L[LANG].wait; else setRec(null);
+}
+
+async function getStream() {
+  if (!stream || !stream.active)
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  return stream;
+}
+function pickMime() {
+  if (!window.MediaRecorder) return "";
+  for (const m of ["audio/webm;codecs=opus", "audio/mp4", "audio/webm", "audio/aac"])
+    if (MediaRecorder.isTypeSupported(m)) return m;
+  return "";
+}
+
+async function toggle(side) {
+  audioCtx();                                 // разблокировать звук (iPhone) по нажатию
+  if (!KEY) { openCfg(); return; }
+  if (MODE === "rt") return toggleRT(side);
+  if (rec && rec.state === "recording") { if (who === side) rec.stop(); return; }
+  if (busy) return;
+  try {
+    const s = await getStream();
+    const m = pickMime();
+    rec = new MediaRecorder(s, m ? { mimeType: m } : undefined);
+  } catch (e) { status("Нет доступа к микрофону: " + e.message, true); return; }
+  chunks = []; who = side; t0 = Date.now();
+  rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  rec.onstop = () => {
+    clearTimeout(recTimer);
+    const type = rec.mimeType || "audio/webm";
+    const blob = new Blob(chunks, { type });
+    setRec(null);
+    handle(side, blob, (Date.now() - t0) / 1000);
+  };
+  rec.start();
+  setRec(side);
+  status(side === "me" ? "Говори…" : "Слушаю собеседника…");
+  recTimer = setTimeout(() => { if (rec && rec.state === "recording") rec.stop(); }, 60000);
+}
+
+
+// ---------------- режим «на лету»: gpt-realtime-translate по WebRTC ----------------
+function closeRT(side) {
+  const s = RT[side];
+  if (!s) return;
+  try { s.dc.close(); } catch (_) {}
+  try { s.pc.close(); } catch (_) {}
+  try { s.audio.srcObject = null; } catch (_) {}
+  RT[side] = null;
+}
+function closeAllRT() { stopRT(); closeRT("me"); closeRT("them"); }
+
+async function rtSession(side) {
+  const target = side === "me" ? LANG : "ru";
+  let s = RT[side];
+  if (s && s.target === target && !["failed", "closed", "disconnected"].includes(s.pc.connectionState)) return s;
+  closeRT(side);
+  const cs = await (await api("/realtime/translations/client_secrets", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session: { model: "gpt-realtime-translate",
+      audio: { input: { transcription: { model: "gpt-realtime-whisper" } }, output: { language: target } } } })
+  })).json();
+  const secret = cs.value || (cs.client_secret && cs.client_secret.value);
+  if (!secret) throw new Error("не получил ключ сессии");
+  const ms = await getStream();
+  const track = ms.getAudioTracks()[0];
+  const pc = new RTCPeerConnection();
+  const audio = document.createElement("audio");
+  audio.autoplay = true; audio.setAttribute("playsinline", "");
+  document.body.appendChild(audio);
+  pc.ontrack = e => { audio.srcObject = e.streams[0]; audio.play().catch(() => {}); };
+  const sender = pc.addTrack(track, ms);
+  const dc = pc.createDataChannel("oai-events");
+  dc.onmessage = e => { try { onRtEvent(side, JSON.parse(e.data)); } catch (_) {} };
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  const r = await fetch(API + "/realtime/translations/calls", {
+    method: "POST", body: offer.sdp,
+    headers: { Authorization: "Bearer " + secret, "Content-Type": "application/sdp" } });
+  if (!r.ok) throw new Error("на лету: " + (await r.text()).slice(0, 160));
+  await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
+  await sender.replaceTrack(null);                 // пока кнопка не нажата — ничего не шлём
+  s = { pc, dc, sender, audio, track, target };
+  RT[side] = s;
+  return s;
+}
+
+async function stopRT() {
+  if (!rtActive) return;
+  const s = RT[rtActive];
+  if (s) { try { await s.sender.replaceTrack(null); } catch (_) {} }
+  addCost(PRICE_RT * (Date.now() - rtSince) / 60000);
+  rtActive = null;
+  setRec(null);
+  status("сессия " + money(costSession));
+}
+
+async function toggleRT(side) {
+  if (rtActive === side) { await stopRT(); return; }
+  await stopRT();
+  try {
+    status("Подключаюсь…");
+    $("meBtn").disabled = $("themBtn").disabled = true;
+    const s = await rtSession(side);
+    s.audio.muted = side === "me" ? !SPEAK_ME : !SPEAK_RU;
+    s.audio.play().catch(() => {});
+    if (side === "me") { $("meBig").textContent = ""; $("meSmall").textContent = ""; $("themBig").textContent = ""; }
+    else { $("themBig").textContent = ""; $("meBig").textContent = ""; $("meSmall").textContent = ""; }
+    $("themSmall").textContent = "";
+    await s.sender.replaceTrack(s.track);
+    rtActive = side; rtSince = Date.now();
+    setRec(side);
+    status(side === "me" ? "Говори — перевожу на лету" : "Слушаю — перевожу на лету");
+  } catch (e) {
+    status("Ошибка: " + e.message, true);
+  } finally { $("meBtn").disabled = $("themBtn").disabled = false; }
+}
+
+function onRtEvent(side, ev) {
+  const t = ev.type || "";
+  const d = ev.delta || "";
+  if (t.endsWith("output_transcript.delta")) {
+    if (side === "me") { $("themBig").textContent += d; $("meSmall").textContent = "→ " + $("themBig").textContent; }
+    else { $("meBig").textContent += d; }
+  } else if (t.endsWith("input_transcript.delta")) {
+    if (side === "me") $("meBig").textContent += d;
+    else { $("themBig").textContent += d; $("meSmall").textContent = $("themBig").textContent; }
+  } else if (t === "error" || t.endsWith(".error")) {
+    status("Ошибка: " + ((ev.error && ev.error.message) || t), true);
+  }
+}
+
+async function handle(side, blob, dur) {
+  if (dur < 0.5 || blob.size < 1500) { status("Слишком коротко"); return; }
+  busy = true; setBusy(true);
+  const from = side === "me" ? "ru" : LANG, to = side === "me" ? LANG : "ru";
+  try {
+    status("Распознаю…");
+    const src = await transcribe(blob, from, dur);
+    if (!src || src.length < 2) { status("Ничего не расслышал"); return; }
+    show(side, src, null);
+    status("Перевожу…");
+    const tr = await translate(src, from, to);
+    show(side, src, tr);
+    hist.push((side === "me" ? "Андрей: " : "Собеседник: ") + src);
+    if (hist.length > 6) hist.shift();
+    if ((side === "me" && SPEAK_ME) || (side === "them" && SPEAK_RU)) { status("Говорю…"); await speak(tr, to); }
+    status("сессия " + money(costSession));
+  } catch (e) {
+    status("Ошибка: " + e.message, true);
+  } finally { busy = false; setBusy(false); }
+}
+
+function show(side, src, tr) {
+  if (side === "me") {
+    $("meBig").textContent = src;
+    $("meSmall").textContent = tr ? "→ " + tr : "";
+    $("themBig").textContent = tr || "…";
+    $("themSmall").textContent = "";
+  } else {
+    $("themBig").textContent = src;
+    $("themSmall").textContent = "";
+    $("meBig").textContent = tr || "…";
+    $("meSmall").textContent = tr ? src : "";
+  }
+}
+
+async function api(path, opts) {
+  const r = await fetch(API + path, { ...opts, headers: { Authorization: "Bearer " + KEY, ...(opts.headers || {}) } });
+  if (!r.ok) {
+    let msg = r.status + "";
+    try { msg = (await r.json()).error.message; } catch (_) {}
+    if (r.status === 401) msg = "неверный ключ OpenAI";
+    throw new Error(msg);
+  }
+  return r;
+}
+
+async function transcribe(blob, lang, dur) {
+  const ext = blob.type.includes("mp4") || blob.type.includes("aac") ? "m4a" : "webm";
+  const fd = new FormData();
+  fd.append("file", blob, "speech." + ext);
+  fd.append("model", STT);
+  fd.append("language", lang);
+  fd.append("prompt", L[lang].prompt);
+  const j = await (await api("/audio/transcriptions", { method: "POST", body: fd })).json();
+  addCost(PRICE.stt * dur / 60);
+  return (j.text || "").trim();
+}
+
+async function translate(text, from, to) {
+  const sys = `Ты устный переводчик живого разговора с ${FROM[from]} на ${L[to].name}. ` +
+    "Переводи естественно, разговорным языком, сохраняя смысл и тон. Выведи ТОЛЬКО перевод последней реплики, без кавычек и пояснений.";
+  const ctxText = hist.length ? "Предыдущие реплики (для контекста):\n" + hist.join("\n") + "\n\n" : "";
+  const j = await (await api("/chat/completions", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: LLM, temperature: 0.2,
+      messages: [{ role: "system", content: sys }, { role: "user", content: ctxText + "Переведи:\n" + text }] })
+  })).json();
+  const u = j.usage || {};
+  addCost((u.prompt_tokens || 0) * PRICE.llmIn + (u.completion_tokens || 0) * PRICE.llmOut);
+  return j.choices[0].message.content.trim();
+}
+
+async function speak(text, lang) {
+  const r = await api("/audio/speech", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: TTS, voice: VOICE, input: text, response_format: "mp3", instructions: L[lang].tts })
+  });
+  const buf = await r.arrayBuffer();
+  const ac = audioCtx();
+  const audio = await new Promise((ok, bad) => ac.decodeAudioData(buf, ok, bad));
+  addCost(PRICE.tts * audio.duration / 60);
+  await new Promise(done => {
+    const s = ac.createBufferSource();
+    s.buffer = audio; s.connect(ac.destination); s.onended = done; s.start();
+  });
+}
+
+function openCfg() {
+  $("keyIn").value = KEY;
+  $("speakRu").checked = SPEAK_RU;
+  $("speakMe").checked = SPEAK_ME;
+  $("costInfo").textContent = `Расходы (оценка): сессия ${money(costSession)} · ${ym}: ${money(costMonth)}`;
+  $("cfg").showModal();
+}
+$("cfgSave").onclick = () => {
+  KEY = $("keyIn").value.trim(); localStorage.setItem("oai_key", KEY);
+  SPEAK_RU = $("speakRu").checked; localStorage.setItem("speak_ru", SPEAK_RU ? "1" : "0");
+  SPEAK_ME = $("speakMe").checked; localStorage.setItem("speak_me", SPEAK_ME ? "1" : "0");
+  $("cfg").close();
+  status(KEY ? "Готово" : "Нужен ключ OpenAI", !KEY);
+};
+$("cfgCancel").onclick = () => $("cfg").close();
+$("cfgBtn").onclick = openCfg;
+$("meBtn").onclick = () => toggle("me");
+$("themBtn").onclick = () => toggle("them");
+$("modeBtn").onclick = () => {
+  if (busy || rtActive || (rec && rec.state === "recording")) return;
+  MODE = MODE === "rt" ? "phrase" : "rt";
+  localStorage.setItem("mode", MODE);
+  if (MODE === "phrase") closeAllRT();
+  applyLang();
+  status(MODE === "rt" ? "⚡ На лету: перевод идёт, пока говоришь" : "🎯 По фразам: сказал — нажал — перевод");
+};
+$("langBtn").onclick = () => {
+  if (busy || rtActive || (rec && rec.state === "recording")) return;
+  closeAllRT();
+  LANG = LANG === "he" ? "en" : "he";
+  $("themBig").textContent = ""; $("meBig").textContent = ""; $("themSmall").textContent = ""; $("meSmall").textContent = "";
+  hist.length = 0;
+  applyLang();
+};
+
+// не гасить экран во время разговора
+async function keepAwake() { try { if ("wakeLock" in navigator) await navigator.wakeLock.request("screen"); } catch (_) {} }
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") keepAwake(); });
+
+applyLang();
+keepAwake();
+if (!KEY) { status("Нажми ⚙︎ и введи ключ OpenAI", true); }
+</script>
+</body>
+</html>
